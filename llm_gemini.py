@@ -649,6 +649,9 @@ class _SharedGemini:
     def process_candidates(self, candidates, response):
         # We only use the first candidate
         for part in candidates[0]["content"]["parts"]:
+            # Skip thinking traces - they have thought=true
+            if part.get("thought"):
+                continue
             yield self.process_part(part, response)
 
     def set_usage(self, response):
@@ -750,7 +753,17 @@ class AsyncGeminiPro(_SharedGemini, llm.AsyncKeyModel):
 @llm.hookimpl
 def register_embedding_models(register):
     register(GeminiEmbeddingModel("text-embedding-004", "text-embedding-004"))
-    # gemini-embedding-exp-03-07 in different truncation sizes
+    # gemini-embedding-001 - stable model (3072 default, truncatable to 768/1536)
+    register(
+        GeminiEmbeddingModel("gemini-embedding-001", "gemini-embedding-001"),
+    )
+    for i in (768, 1536):
+        register(
+            GeminiEmbeddingModel(
+                f"gemini-embedding-001-{i}", "gemini-embedding-001", i
+            ),
+        )
+    # gemini-embedding-exp-03-07 in different truncation sizes (deprecated Oct 2025)
     register(
         GeminiEmbeddingModel(
             "gemini-embedding-exp-03-07", "gemini-embedding-exp-03-07"
