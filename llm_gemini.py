@@ -525,18 +525,19 @@ class _SharedGemini:
                     if stored_fc_parts:
                         model_parts.extend(stored_fc_parts)
                     else:
-                        # Fallback: reconstruct without signature (for older responses)
-                        model_parts.extend(
-                            [
-                                {
-                                    "functionCall": {
-                                        "name": tool_call.name,
-                                        "args": tool_call.arguments,
-                                    }
+                        # Fallback: reconstruct, adding placeholder signature for Gemini 3
+                        # models which require thoughtSignature for function calls
+                        for i, tool_call in enumerate(tool_calls):
+                            fc_part = {
+                                "functionCall": {
+                                    "name": tool_call.name,
+                                    "args": tool_call.arguments,
                                 }
-                                for tool_call in tool_calls
-                            ]
-                        )
+                            }
+                            # Gemini 3 requires thoughtSignature on first functionCall
+                            if i == 0 and "gemini-3" in self.gemini_model_id:
+                                fc_part["thoughtSignature"] = ""
+                            model_parts.append(fc_part)
                 messages.append({"role": "model", "parts": model_parts})
 
         parts = []
@@ -722,6 +723,7 @@ class _SharedGemini:
                     # Preserve function call parts with thoughtSignature for multi-turn
                     if "functionCall" in part:
                         fc_part = {"functionCall": part["functionCall"]}
+                        # Always include thoughtSignature if present, or empty for Gemini 3
                         if "thoughtSignature" in part:
                             fc_part["thoughtSignature"] = part["thoughtSignature"]
                         function_call_parts.append(fc_part)
