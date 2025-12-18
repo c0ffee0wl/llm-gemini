@@ -529,19 +529,18 @@ class _SharedGemini:
                     if stored_fc_parts:
                         model_parts.extend(stored_fc_parts)
                     else:
-                        # Fallback: reconstruct, adding placeholder signature for Gemini 3
-                        # models which require thoughtSignature for function calls
-                        for i, tool_call in enumerate(tool_calls):
-                            fc_part = {
-                                "functionCall": {
-                                    "name": tool_call.name,
-                                    "args": tool_call.arguments,
+                        # Fallback: reconstruct without signature (for older responses)
+                        model_parts.extend(
+                            [
+                                {
+                                    "functionCall": {
+                                        "name": tool_call.name,
+                                        "args": tool_call.arguments,
+                                    }
                                 }
-                            }
-                            # Gemini 3 requires thoughtSignature on first functionCall
-                            if i == 0 and "gemini-3" in self.gemini_model_id:
-                                fc_part["thoughtSignature"] = ""
-                            model_parts.append(fc_part)
+                                for tool_call in tool_calls
+                            ]
+                        )
                 messages.append({"role": "model", "parts": model_parts})
 
         parts = []
@@ -718,7 +717,7 @@ class _SharedGemini:
             for candidate in response.response_json.get("candidates", []):
                 for part in candidate.get("content", {}).get("parts", []):
                     if part.get("thought"):
-                        trace = {"text": part.get("text", ""), "thought": True}
+                        trace = {"thought": True, "text": part.get("text", "")}
                         if "thoughtSignature" in part:
                             trace["thoughtSignature"] = part["thoughtSignature"]
                         thinking_traces.append(trace)
