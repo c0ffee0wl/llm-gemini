@@ -516,6 +516,10 @@ class _SharedGemini:
                     )
                 messages.append({"role": "user", "parts": parts})
                 model_parts = []
+                # Restore thinking traces with thoughtSignature for multi-turn context
+                stored_thinking = response.response_json.get("thinking_traces")
+                if stored_thinking:
+                    model_parts.extend(stored_thinking)
                 response_text = response.text_or_raise()
                 model_parts.append({"text": response_text})
                 tool_calls = response.tool_calls_or_raise()
@@ -714,7 +718,7 @@ class _SharedGemini:
             for candidate in response.response_json.get("candidates", []):
                 for part in candidate.get("content", {}).get("parts", []):
                     if part.get("thought"):
-                        trace = {"text": part.get("text", "")}
+                        trace = {"text": part.get("text", ""), "thought": True}
                         if "thoughtSignature" in part:
                             trace["thoughtSignature"] = part["thoughtSignature"]
                         thinking_traces.append(trace)
