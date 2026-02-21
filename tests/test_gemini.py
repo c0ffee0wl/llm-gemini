@@ -19,7 +19,9 @@ def test_prompt():
     model = llm.get_model("gemini-1.5-flash-latest")
     response = model.prompt("Name for a pet pelican, just the name", key=GEMINI_API_KEY)
     assert str(response) == "Percy\n"
-    assert response.response_json == {
+    response_json = response.response_json.copy()
+    original_model_parts = response_json.pop("original_model_parts", None)
+    assert response_json == {
         "candidates": [
             {
                 "finishReason": "STOP",
@@ -45,6 +47,7 @@ def test_prompt():
         ],
         "modelVersion": "gemini-1.5-flash-latest",
     }
+    assert original_model_parts == [{"text": "Percy\n"}]
     assert response.token_details == {
         "candidatesTokenCount": 2,
         "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 9}],
@@ -89,7 +92,9 @@ def test_prompt_with_pydantic_schema():
         "bio": "A fluffy Samoyed with exceptional intelligence and a love for belly rubs. He's mastered several tricks, including fetching the newspaper and opening doors.",
         "name": "Cloud",
     }
-    assert response.response_json == {
+    response_json = response.response_json.copy()
+    response_json.pop("original_model_parts", None)
+    assert response_json == {
         "candidates": [
             {
                 "finishReason": "STOP",
@@ -915,3 +920,34 @@ def test_thinking_level_not_in_request_when_not_set():
     # generationConfig may or may not exist, but if it does, thinkingConfig should not be there
     if "generationConfig" in body:
         assert "thinkingConfig" not in body["generationConfig"]
+
+
+@pytest.mark.vcr
+def test_tools_with_gemini_3_thought_signatures():
+    """Test that tools work with Gemini 3 models which require thought signatures.
+
+    Gemini 3 models return thoughtSignature with function calls, and these must be
+    included when sending function responses back to the model.
+    """
+    model = llm.get_model("gemini-3-flash-preview")
+
+    def multiply(x: int, y: int) -> int:
+        """Multiply two numbers."""
+        return x * y
+
+    chain_response = model.chain(
+        "What is 5 times 3?",
+        tools=[
+            llm.Tool.function(multiply, name="multiply"),
+        ],
+        key=GEMINI_API_KEY,
+    )
+    text = chain_response.text()
+
+    # Verify the tool was called and the response mentions the result
+    assert len(chain_response._responses) >= 2
+    first_response = chain_response._responses[0]
+    assert len(first_response.tool_calls()) == 1
+    assert first_response.tool_calls()[0].name == "multiply"
+    # The result should be 15
+    assert "15" in text

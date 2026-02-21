@@ -53,6 +53,8 @@ GOOGLE_SEARCH_MODELS = {
     "gemini-2.5-flash-lite-preview-09-2025",
     "gemini-3-pro-preview",
     "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-customtools",
 }
 
 # Older Google models used google_search_retrieval instead of google_search
@@ -88,6 +90,8 @@ THINKING_BUDGET_MODELS = {
 MODEL_THINKING_LEVELS = {
     "gemini-3-flash-preview": ["minimal", "low", "medium", "high"],
     "gemini-3-pro-preview": ["low", "high"],
+    "gemini-3.1-pro-preview": ["low", "medium", "high"],
+    "gemini-3.1-pro-preview-customtools": ["low", "medium", "high"],
 }
 
 NO_VISION_MODELS = {"gemma-3-1b-it", "gemma-3n-e4b-it"}
@@ -107,6 +111,7 @@ class MediaResolution(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    ULTRA_HIGH = "ultra_high"
     UNSPECIFIED = "unspecified"
 
 
@@ -203,6 +208,9 @@ def register_models(register):
         "gemini-3-pro-preview",
         # 17th December 2025:
         "gemini-3-flash-preview",
+        # 19th February 2026
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
     ):
         can_google_search = model_id in GOOGLE_SEARCH_MODELS
         can_thinking_budget = model_id in THINKING_BUDGET_MODELS
@@ -254,6 +262,7 @@ def is_youtube_url(url):
         r"^https?://(www\.)?youtube\.com/watch\?v=",
         r"^https?://youtu\.be/",
         r"^https?://(www\.)?youtube\.com/embed/",
+        r"^https?://(www\.)?youtube\.com/shorts/",
     ]
     return any(re.match(pattern, url) for pattern in youtube_patterns)
 
@@ -597,7 +606,7 @@ class _SharedGemini:
         if prompt.options and self.can_google_search and prompt.options.google_search:
             tool_name = (
                 "google_search_retrieval"
-                if self.model_id in GOOGLE_SEARCH_MODELS_USING_SEARCH_RETRIEVAL
+                if self.gemini_model_id in GOOGLE_SEARCH_MODELS_USING_SEARCH_RETRIEVAL
                 else "google_search"
             )
             tools.append({tool_name: {}})
@@ -663,18 +672,6 @@ class _SharedGemini:
                 if config_value is not None:
                     generation_config[other_key] = config_value
 
-        has_youtube = any(
-            attachment.url and is_youtube_url(attachment.url)
-            for attachment in prompt.attachments
-        ) or (
-            conversation
-            and any(
-                attachment.url and is_youtube_url(attachment.url)
-                for response in conversation.responses
-                for attachment in response.attachments
-            )
-        )
-
         # See https://ai.google.dev/api/generate-content#MediaResolution for mediaResolution token counts
         if self.can_media_resolution:
             media_resolution = getattr(prompt.options, "media_resolution", None)
@@ -713,35 +710,71 @@ class _SharedGemini:
                 continue
             yield self.process_part(part, response)
 
-    def set_usage(self, response):
-        try:
-            # Store original model parts for exact restoration in multi-turn
-            # (must be done before content is removed below)
-            # CRITICAL: Use deep copy to preserve thoughtSignature for Gemini 3 models
-            for candidate in response.response_json.get("candidates", []):
-                content = candidate.get("content", {})
-                if content.get("parts"):
-                    response.response_json["original_model_parts"] = copy.deepcopy(content["parts"])
-                    break  # Only need first candidate
+    @staticmethod
+    def _merge_streaming_parts(gathered):
+        """Collect all parts from streaming events and merge consecutive text parts.
 
-            # Extract thinking traces and function call parts before cleanup
+        During streaming, functionCall parts with thoughtSignature arrive in
+        earlier events and are absent from the final event (which typically
+        contains only usageMetadata).  This helper accumulates every part from
+        every event's first candidate, merging consecutive text chunks that
+        share the same ``thought`` status into a single text part while
+        preserving ``thoughtSignature`` from the last chunk.  Non-text parts
+        (functionCall, executableCode, etc.) are kept exactly as-is.
+        """
+        merged = []
+        for event in gathered:
+            candidates = event.get("candidates", [])
+            if not candidates:
+                continue
+            parts = candidates[0].get("content", {}).get("parts", [])
+            for part in parts:
+                is_text = "text" in part and "functionCall" not in part and "executableCode" not in part and "codeExecutionResult" not in part
+                if is_text and merged:
+                    prev = merged[-1]
+                    prev_is_text = "text" in prev and "functionCall" not in prev and "executableCode" not in prev and "codeExecutionResult" not in prev
+                    if prev_is_text and prev.get("thought") == part.get("thought"):
+                        # Merge consecutive text parts with same thought status
+                        prev["text"] = prev.get("text", "") + part.get("text", "")
+                        # Keep thoughtSignature from the latest chunk
+                        if "thoughtSignature" in part:
+                            prev["thoughtSignature"] = part["thoughtSignature"]
+                        continue
+                merged.append(copy.deepcopy(part))
+        return merged
+
+    def set_usage(self, response, gathered=None):
+        try:
+            if gathered is not None:
+                # Streaming: merge parts from all events to capture
+                # thoughtSignature fields that only appear in earlier events
+                all_parts = self._merge_streaming_parts(gathered)
+            else:
+                # Non-streaming fallback: read from the single response
+                all_parts = None
+                for candidate in response.response_json.get("candidates", []):
+                    content = candidate.get("content", {})
+                    if content.get("parts"):
+                        all_parts = copy.deepcopy(content["parts"])
+                        break
+
+            if all_parts:
+                response.response_json["original_model_parts"] = all_parts
+
+            # Extract thinking traces and function call parts for multi-turn
             thinking_traces = []
             function_call_parts = []
-            for candidate in response.response_json.get("candidates", []):
-                for part in candidate.get("content", {}).get("parts", []):
-                    if part.get("thought"):
-                        trace = {"thought": True, "text": part.get("text", "")}
-                        if "thoughtSignature" in part:
-                            trace["thoughtSignature"] = part["thoughtSignature"]
-                        thinking_traces.append(trace)
-                    # Preserve function call parts with thoughtSignature for multi-turn
-                    if "functionCall" in part:
-                        # Deep copy to preserve data even if original is modified
-                        fc_part = {"functionCall": copy.deepcopy(part["functionCall"])}
-                        # Always include thoughtSignature if present, or empty for Gemini 3
-                        if "thoughtSignature" in part:
-                            fc_part["thoughtSignature"] = part["thoughtSignature"]
-                        function_call_parts.append(fc_part)
+            for part in (all_parts or []):
+                if part.get("thought"):
+                    trace = {"thought": True, "text": part.get("text", "")}
+                    if "thoughtSignature" in part:
+                        trace["thoughtSignature"] = part["thoughtSignature"]
+                    thinking_traces.append(trace)
+                if "functionCall" in part:
+                    fc_part = {"functionCall": copy.deepcopy(part["functionCall"])}
+                    if "thoughtSignature" in part:
+                        fc_part["thoughtSignature"] = part["thoughtSignature"]
+                    function_call_parts.append(fc_part)
             if thinking_traces:
                 response.response_json["thinking_traces"] = thinking_traces
             if function_call_parts:
@@ -803,7 +836,7 @@ class GeminiPro(_SharedGemini, llm.KeyModel):
         response.response_json = gathered[-1]
         resolved_model = gathered[-1]["modelVersion"]
         response.set_resolved_model(resolved_model)
-        self.set_usage(response)
+        self.set_usage(response, gathered)
 
 
 class AsyncGeminiPro(_SharedGemini, llm.AsyncKeyModel):
@@ -838,7 +871,9 @@ class AsyncGeminiPro(_SharedGemini, llm.AsyncKeyModel):
                             gathered.append(event)
                         events.clear()
         response.response_json = gathered[-1]
-        self.set_usage(response)
+        resolved_model = gathered[-1]["modelVersion"]
+        response.set_resolved_model(resolved_model)
+        self.set_usage(response, gathered)
 
 
 @llm.hookimpl
