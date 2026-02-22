@@ -5,6 +5,7 @@ import httpx
 import ijson
 import json
 import llm
+import os
 import re
 from pydantic import Field, create_model
 from typing import Optional
@@ -265,6 +266,39 @@ def is_youtube_url(url):
         r"^https?://(www\.)?youtube\.com/shorts/",
     ]
     return any(re.match(pattern, url) for pattern in youtube_patterns)
+
+
+def _save_gemini_config(key, value):
+    keys_path = llm.user_dir() / "keys.json"
+    if keys_path.exists():
+        with open(keys_path, "r") as f:
+            keys = json.load(f)
+    else:
+        keys = {"// Note": "This file stores secret API credentials. Do not share!"}
+        keys_path.parent.mkdir(parents=True, exist_ok=True)
+    keys[key] = value
+    with open(keys_path, "w") as f:
+        json.dump(keys, f, indent=2)
+        f.write("\n")
+
+
+def get_default_thinking_level():
+    """
+    Get the default thinking level from environment variable or config.
+    Precedence: env var GEMINI_THINKING_LEVEL > config gemini-thinking-level > None
+    """
+    level = os.environ.get("GEMINI_THINKING_LEVEL")
+    if level:
+        return level.lower()
+
+    try:
+        level = llm.get_key("", "gemini-thinking-level", "GEMINI_THINKING_LEVEL")
+        if level:
+            return level.lower()
+    except Exception:
+        pass
+
+    return None
 
 
 def cleanup_schema(schema, in_properties=False):
@@ -645,12 +679,12 @@ class _SharedGemini:
                 "thinking_budget": prompt.options.thinking_budget
             }
 
-        if (
-            self.thinking_levels
-            and getattr(prompt.options, "thinking_level", None) is not None
-        ):
-            # Get the string value from the enum
-            thinking_level = prompt.options.thinking_level
+        thinking_level = getattr(prompt.options, "thinking_level", None)
+        if thinking_level is None and self.thinking_levels:
+            default_level = get_default_thinking_level()
+            if default_level and default_level in self.thinking_levels:
+                thinking_level = default_level
+        if self.thinking_levels and thinking_level is not None:
             if hasattr(thinking_level, "value"):
                 thinking_level = thinking_level.value
             generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
@@ -997,3 +1031,37 @@ def register_commands(cli):
             click.echo(json.dumps(response.json()["files"], indent=2))
         else:
             click.echo("No files uploaded to the Gemini API.", err=True)
+
+    @gemini.command(name="set-thinking-level")
+    @click.argument("level")
+    def set_thinking_level(level):
+        """
+        Set the default thinking level for Gemini 3+ models
+
+        Valid levels: minimal, low, medium, high
+
+        Example: llm gemini set-thinking-level low
+
+        This sets the default thinkingLevel sent to models that support it.
+        Without this, the server default (high) is used.
+        Per-request --thinking-level still overrides this default.
+        """
+        valid_levels = {"minimal", "low", "medium", "high"}
+        level = level.lower()
+        if level not in valid_levels:
+            raise click.ClickException(
+                f"Invalid thinking level: {level}\n"
+                f"Valid levels: {', '.join(sorted(valid_levels))}"
+            )
+        _save_gemini_config("gemini-thinking-level", level)
+        click.echo(f"Default thinking level set to: {level}")
+
+    @gemini.command(name="config")
+    def show_config():
+        """
+        Show current Gemini configuration
+        """
+        thinking_level = get_default_thinking_level()
+
+        click.echo("Current Gemini Configuration:")
+        click.echo(f"  Default Thinking Level: {thinking_level or 'Not set (server default: high)'}")
