@@ -859,6 +859,33 @@ def test_gemini_3_pro_has_limited_thinking_levels():
     assert level_values == {"low", "high"}
 
 
+def test_gemini_31_flash_lite_has_all_thinking_levels():
+    """Gemini 3.1 Flash Lite should support minimal, low, medium, high thinking levels."""
+    import typing
+
+    model = llm.get_model("gemini-3.1-flash-lite-preview")
+    options_class = model.Options
+
+    # Check that thinking_level field exists
+    assert "thinking_level" in options_class.model_fields
+
+    # Get the allowed values from the field's annotation
+    field_info = options_class.model_fields["thinking_level"]
+    annotation = field_info.annotation
+    args = typing.get_args(annotation)
+    thinking_enum = args[0] if args else annotation
+
+    # Check all 4 levels are available
+    level_values = {e.value for e in thinking_enum}
+    assert level_values == {"minimal", "low", "medium", "high"}
+
+    # Should not have thinking_budget (Gemini 3.x uses thinking_level)
+    assert "thinking_budget" not in options_class.model_fields
+
+    # Should have google_search option
+    assert "google_search" in options_class.model_fields
+
+
 def test_gemini_25_flash_has_thinking_budget_not_level():
     """Gemini 2.5 Flash should have thinking_budget but not thinking_level."""
     model = llm.get_model("gemini-2.5-flash")
