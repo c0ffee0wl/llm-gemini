@@ -725,12 +725,14 @@ class _SharedGemini:
 
     def process_part(self, part, response):
         if "functionCall" in part:
-            response.add_tool_call(
-                llm.ToolCall(
-                    name=part["functionCall"]["name"],
-                    arguments=part["functionCall"]["args"],
-                )
+            tool_call = llm.ToolCall(
+                name=part["functionCall"]["name"],
+                arguments=part["functionCall"]["args"],
             )
+            # Store thought signature if present (required for Gemini 3 models)
+            if "thoughtSignature" in part:
+                tool_call.thought_signature = part["thoughtSignature"]
+            response.add_tool_call(tool_call)
         if "text" in part:
             return part["text"]
         elif "executableCode" in part:
